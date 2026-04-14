@@ -16,6 +16,8 @@ node_modules/
 .DS_Store
 .env
 .env.local
+.env.prod
+.env.production
 .env.development.local
 .env.test.local
 .env.production.local
@@ -29,5 +31,9 @@ ca.pem
 
 /ca.pem
 ca.pem/
+
+# Claude project instructions — never commit
+CLAUDE.md
+CLAUDE.local.md
 
 

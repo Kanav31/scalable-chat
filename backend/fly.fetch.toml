@@ -1,0 +1,28 @@
+# Fly.io config for fetchService.js (REST API for chat history)
+app = "threads-fetch"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  START_SCRIPT = "fetchService.js"
+  FETCH_PORT = "5002"
+  NODE_ENV = "production"
+
+[[services]]
+  internal_port = 5002
+  protocol = "tcp"
+
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+  [services.http_checks]
+    interval = "15s"
+    timeout  = "5s"
+    path     = "/health"

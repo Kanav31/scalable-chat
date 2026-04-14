@@ -1,185 +1,310 @@
-import React, { useContext, useEffect, useState } from "react";
-import { ChatContext } from "../../Context/ChatContext";
-import io from "socket.io-client";
-import "./Rooms.css";
+import React, { useContext, useEffect, useRef, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
+import { ChatContext } from '../../Context/ChatContext';
+import io from 'socket.io-client';
+import './Rooms.css';
+import '../MainPanel/MainPanel.css';
+
+const getInitial = (name) => (name ? name.charAt(0).toUpperCase() : '?');
+const AVATAR_COLORS = ['#6c63ff','#e879f9','#38bdf8','#34d399','#fb923c','#f472b6'];
+const avatarColor   = (name) => AVATAR_COLORS[(name?.charCodeAt(0) || 0) % AVATAR_COLORS.length];
+
+// Default rooms shown in sidebar so users have something to click on immediately
+const DEFAULT_ROOMS = ['general', 'random', 'dev-talk'];
 
 const Rooms = () => {
-  const { api } = useContext(ChatContext);
-  const [socket, setSocket] = useState(null);
-  const [rooms, setRooms] = useState([]);
-  const [messages, setMessages] = useState({});
-  const [messageInput, setMessageInput] = useState("");
-  const [joinRoomPrompt, setJoinRoomPrompt] = useState(false);
-  const [roomToJoin, setRoomToJoin] = useState("");
-  const [activeRoom, setActiveRoom] = useState(null);
+  const { api }       = useContext(ChatContext);
+  const navigate      = useNavigate();
+  const { roomName: roomFromUrl } = useParams(); // e.g. /rooms/gaming → "gaming"
 
+  const myUsername = localStorage.getItem('username');
+
+  // ── Auth guard with redirect-back flow ────────────────────────────────────
+  // If someone opens a shared link like /rooms/gaming without being logged in,
+  // we save the full path to sessionStorage so Login can send them back here
+  // after they pick a username.
   useEffect(() => {
-    const newSocket = io(api);
-    setSocket(newSocket);
+    if (!myUsername) {
+      sessionStorage.setItem('intended_path', window.location.pathname);
+      navigate('/');
+    }
+  }, [myUsername, navigate]);
 
-    return () => newSocket.close();
-  }, [api]);
+  const [socket,       setSocket]       = useState(null);
+  const [rooms,        setRooms]        = useState([]);
+  const [messages,     setMessages]     = useState({});
+  const [activeRoom,   setActiveRoom]   = useState(null);
+  const [messageInput, setMessageInput] = useState('');
+  const [showJoinForm, setShowJoinForm] = useState(false);
+  const [roomToJoin,   setRoomToJoin]   = useState('');
+  const [copied,       setCopied]       = useState(false);
 
+  const messagesEndRef = useRef(null);
+  const inputRef       = useRef(null);
+
+  // ── Socket setup ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!myUsername) return;
+    const sock = io(api);
+    setSocket(sock);
+    sock.on('connect', () => sock.emit('setUsername', myUsername));
+    return () => sock.close();
+  }, [api, myUsername]);
+
+  // ── Socket event listeners ────────────────────────────────────────────────
   useEffect(() => {
     if (!socket) return;
 
-    // socket.emit("fetchMessages", activeRoom);
-    // const userRooms = localStorage.getItem('userRooms') ? JSON.parse(localStorage.getItem('userRooms')) : [];
-    // setRooms(userRooms);
-    // console.log("rooms- ",rooms)
-    socket.emit("fetchMessages", activeRoom);
-    
-
-    socket.on("fetchedMessages", (fetchedMessages) => {
-      console.log("ftchedmsg", fetchedMessages)
-      setMessages((prevMessages) => ({
-        ...prevMessages,
-        [activeRoom]: fetchedMessages,
+    socket.on('roommessage', (msg) => {
+      setMessages((prev) => ({
+        ...prev,
+        [msg.room]: [...(prev[msg.room] || []), msg],
       }));
     });
 
-    socket.on("roommessage", (message) => {
-      setMessages((prevMessages) => ({
-        ...prevMessages,
-          [activeRoom]: [...(prevMessages[activeRoom] || []), message],
-      }));
-      console.log("roommsg", message);
+    socket.on('fetchedMessages', (fetched) => {
+      if (!fetched.length) return;
+      const room = fetched[0]?.room;
+      if (!room) return;
+      setMessages((prev) => ({ ...prev, [room]: fetched }));
     });
-  
-    // socket.on("fetchedMessages", (fetchedMessages) => {
-    //   setMessages(fetchedMessages.reduce((acc, message) => {
-    //     return {
-    //       ...acc,
-    //       [message.room]: [...(acc[message.room] || []), message],
-    //     };
-    //   }, {}));
-    // });
-    
 
     return () => {
-      socket.off("roommessage");
-      socket.off("fetchedMessages");
+      socket.off('roommessage');
+      socket.off('fetchedMessages');
     };
+  }, [socket]);
+
+  // ── Auto-join room from URL ───────────────────────────────────────────────
+  // When someone opens a shared link like /rooms/gaming, roomFromUrl = "gaming".
+  // We wait until the socket is ready then auto-join that room — the user lands
+  // directly in the conversation without any manual steps.
+  useEffect(() => {
+    if (socket && roomFromUrl) {
+      joinRoom(roomFromUrl);
+    }
+  }, [socket, roomFromUrl]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Fetch history when active room changes ────────────────────────────────
+  useEffect(() => {
+    if (socket && activeRoom) {
+      socket.emit('fetchMessages', activeRoom);
+    }
   }, [socket, activeRoom]);
 
-  const joinRoom = (roomName) => {
-    if (socket && !rooms.includes(roomName)) {
-      socket.emit("joinRoom", { room: roomName, sender: localStorage.getItem("username") });
-      // const updatedRooms = [...rooms, roomName];
-      setRooms((prevRooms) => [...prevRooms, roomName]);
-      // setRooms(updatedRooms);
-      // localStorage.setItem('userRooms', JSON.stringify(updatedRooms));
-      setActiveRoom(roomName);
+  // ── Scroll to bottom ──────────────────────────────────────────────────────
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages, activeRoom]);
+
+  // ── Join room ─────────────────────────────────────────────────────────────
+  const joinRoom = (name) => {
+    const trimmed = name?.trim();
+    if (!trimmed || !socket || rooms.includes(trimmed)) {
+      // Room already joined — just switch to it
+      if (rooms.includes(trimmed)) setActiveRoom(trimmed);
+      return;
     }
+    socket.emit('joinRoom', { room: trimmed, sender: myUsername });
+    setRooms((prev) => [...prev, trimmed]);
+    setActiveRoom(trimmed);
+    // Update URL so the address bar shows the room name (shareable)
+    navigate(`/rooms/${trimmed}`, { replace: true });
   };
 
-  const leaveRoom = (roomName) => {
-    if (socket && rooms.includes(roomName)) {
-      socket.emit("leaveRoom", roomName);
-      // const updatedRooms = rooms.filter((room) => room !== roomName);
-      // setRooms(updatedRooms);
-      // localStorage.setItem('userRooms', JSON.stringify(updatedRooms));
-      setRooms((prevRooms) => prevRooms.filter((room) => room !== roomName));
-      setMessages((prevMessages) => {
-        const updatedMessages = { ...prevMessages };
-        delete updatedMessages[roomName];
-        return updatedMessages;
-      });
-
-      if (activeRoom === roomName) {
-        setActiveRoom(null);
-      }
-    }
-  };
-
-  const sendMessage = () => {
-    if (socket && messageInput.trim() !== "" && activeRoom) {
-      console.log('activeRoom sendmessage', activeRoom)
-      const message = { room: activeRoom, sender: localStorage.getItem("username"), content: messageInput };
-      console.log("sendmessage - ", message);
-      socket.emit("roommessage", message);
-      console.log("emitted- roomessage")
-      // setMessages((prevMessages) => ({
-      //   ...prevMessages,
-      //   [activeRoom]: [...(prevMessages[activeRoom] || []), message],
-      // }),console.log("sndmsg", message));
-      setMessageInput("");
-    }
-  };
-
-  const handleJoinRoom = () => {
-    setJoinRoomPrompt(true);
-  };
-
-  const handleJoinRoomSubmit = (e) => {
+  const handleJoinSubmit = (e) => {
     e.preventDefault();
     joinRoom(roomToJoin);
-    setRoomToJoin("");
-    setJoinRoomPrompt(false);
+    setRoomToJoin('');
+    setShowJoinForm(false);
   };
 
-  const handleRoomClick = (roomName) => {
-    setActiveRoom(roomName);
-    console.log('activeRoom', activeRoom)
+  // ── Leave room ────────────────────────────────────────────────────────────
+  const leaveRoom = (name) => {
+    if (!socket) return;
+    socket.emit('leaveRoom', name);
+    setRooms((prev) => prev.filter((r) => r !== name));
+    setMessages((prev) => { const n = { ...prev }; delete n[name]; return n; });
+    if (activeRoom === name) {
+      setActiveRoom(null);
+      navigate('/rooms', { replace: true });
+    }
   };
 
-  const returnToMainPanel = () => {
-    window.location.href = "/mainpanel"
-  }
+  // ── Send message ─────────────────────────────────────────────────────────
+  const sendMessage = () => {
+    const content = messageInput.trim();
+    if (!content || !socket || !activeRoom) return;
+    socket.emit('roommessage', { room: activeRoom, sender: myUsername, content });
+    setMessageInput('');
+    inputRef.current?.focus();
+  };
+
+  const handleKeyDown = (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  };
+
+  // ── Copy room link to clipboard ───────────────────────────────────────────
+  // Copies the current URL e.g. http://localhost:3000/rooms/gaming
+  // Anyone who opens this link lands directly in the room.
+  const copyRoomLink = () => {
+    navigator.clipboard.writeText(window.location.href).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  const roomMessages = activeRoom ? (messages[activeRoom] || []) : [];
+
+  // Combine default rooms + joined rooms, deduplicated
+  const allSidebarRooms = [...new Set([...DEFAULT_ROOMS, ...rooms])];
 
   return (
-    <div className="mainpanel-container">
-      <div className="chat-window">
-        <div className="msg-lists">
-          {rooms.map((room) => (
-            <div key={room} className={activeRoom === room ? "active-room" : ""} onClick={() => handleRoomClick(room)}>
-              {room} {activeRoom === room && <button onClick={() => leaveRoom(room)}>Leave</button>}
+    <div className="panel-shell">
+      {/* ── Sidebar ─────────────────────────────────────────────────────── */}
+      <aside className="sidebar">
+        <div className="sidebar-header">
+          <div className="sidebar-logo">
+            <div className="sidebar-logo-icon">T</div>
+            <span className="sidebar-logo-name">Threads</span>
+          </div>
+          {myUsername && (
+            <div className="sidebar-me">
+              <div className="sidebar-me-avatar" style={{ background: avatarColor(myUsername) }}>
+                {getInitial(myUsername)}
+              </div>
+              <span className="sidebar-me-name">{myUsername}</span>
             </div>
-          ))}
-          <button onClick={handleJoinRoom}>Join Other Room +</button>
-          <button onClick={returnToMainPanel}>MainPanel</button>
-          {joinRoomPrompt && (
-            <form onSubmit={handleJoinRoomSubmit}>
+          )}
+        </div>
+
+        <div className="sidebar-section-label">Rooms</div>
+
+        <div className="sidebar-list">
+          {allSidebarRooms.map((room) => {
+            const isJoined = rooms.includes(room);
+            return (
+              <div
+                key={room}
+                className={`sidebar-item ${activeRoom === room ? 'active' : ''}`}
+                onClick={() => isJoined ? setActiveRoom(room) : joinRoom(room)}
+              >
+                <div className="sidebar-item-avatar group">#</div>
+                <span className="sidebar-item-name">{room}</span>
+                {!isJoined && <span className="join-hint">Join</span>}
+                {isJoined && activeRoom === room && (
+                  <button
+                    className="leave-btn"
+                    onClick={(e) => { e.stopPropagation(); leaveRoom(room); }}
+                  >
+                    Leave
+                  </button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="sidebar-footer">
+          {showJoinForm && (
+            <form className="join-room-form" onSubmit={handleJoinSubmit}>
               <input
-                type="text"
-                placeholder="Enter Room ID"
+                className="join-room-input"
+                placeholder="Room name..."
                 value={roomToJoin}
                 onChange={(e) => setRoomToJoin(e.target.value)}
+                autoFocus
               />
-              <button type="submit">Join Room</button>
+              <button type="submit" className="join-room-submit">Join</button>
             </form>
           )}
+          <button className="sidebar-action-btn" onClick={() => setShowJoinForm((v) => !v)}>
+            <span className="sidebar-action-icon">#</span>
+            Join custom room
+          </button>
+          <button className="sidebar-action-btn" onClick={() => navigate('/mainpanel')}>
+            <span className="sidebar-action-icon">←</span>
+            Back to DMs
+          </button>
         </div>
-        <div className="msg-window">
-          {!activeRoom? <h1 className="noRoomSelected">!!! Click On Any Room To See The Messages !!! &nbsp; <h2 className="noRooms">!!! If There Isn't Any Rooms, Please Create One !!!</h2></h1>:""}
-          {activeRoom && (
-            <>
-              <h2>{activeRoom}</h2>
-              <div className="messages-in-window">
-                {messages[activeRoom]?.map((message, index) => (
-                  <div key={index} className="message">
-                    <span className="sender">{message.sender === localStorage.getItem("username") ? "You" : message.sender}</span>{" --> "}
-                    <span className="content">{message.content}</span>
-                  </div>
-                )).reverse()}
-              </div>
-              <div className="input-container">
-                <input
-                  type="text"
-                  placeholder={`Type your message in ${activeRoom}...`}
-                  value={messageInput}
-                  onChange={(e) => setMessageInput(e.target.value)}
-                />
-                <button onClick={sendMessage}>Send</button>
-              </div>
-            </>
-          )}
-        </div>
+      </aside>
+
+      {/* ── Chat area ───────────────────────────────────────────────────── */}
+      <div className="chat-main">
+        {!activeRoom ? (
+          <div className="chat-placeholder">
+            <span className="chat-placeholder-icon">#</span>
+            <span className="chat-placeholder-title">Pick a room to join</span>
+            <span className="chat-placeholder-sub">
+              Click a room on the left, or share a link to invite friends
+            </span>
+          </div>
+        ) : (
+          <>
+            <div className="chat-topbar">
+              <div className="chat-topbar-avatar">#</div>
+              <span className="chat-topbar-name">{activeRoom}</span>
+              {/* Share button — copies the full URL to clipboard */}
+              <button
+                className={`share-btn ${copied ? 'copied' : ''}`}
+                onClick={copyRoomLink}
+              >
+                {copied ? '✓ Copied!' : '🔗 Share link'}
+              </button>
+            </div>
+
+            <div className="chat-messages">
+              {roomMessages.length === 0 ? (
+                <div className="chat-empty">
+                  <span className="chat-empty-icon">#</span>
+                  <span className="chat-empty-text">
+                    No messages yet. Share the link and invite a friend!
+                  </span>
+                </div>
+              ) : (
+                roomMessages.map((msg, i) => {
+                  const isMine = msg.sender === myUsername;
+                  return (
+                    <div key={i} className={`msg-row ${isMine ? 'mine' : 'theirs'}`}>
+                      {!isMine && (
+                        <div className="msg-avatar" style={{ background: avatarColor(msg.sender || '') }}>
+                          {getInitial(msg.sender || '?')}
+                        </div>
+                      )}
+                      <div className="msg-bubble-wrap">
+                        {!isMine && <span className="msg-sender">{msg.sender}</span>}
+                        <div className="msg-bubble">{msg.content}</div>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+
+            <div className="chat-input-bar">
+              <input
+                ref={inputRef}
+                className="chat-input"
+                placeholder={`Message #${activeRoom}...`}
+                value={messageInput}
+                onChange={(e) => setMessageInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+              />
+              <button
+                className="chat-send-btn"
+                onClick={sendMessage}
+                disabled={!messageInput.trim()}
+                aria-label="Send"
+              >
+                ➤
+              </button>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
 };
 
 export default Rooms;
-
-

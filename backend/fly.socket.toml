@@ -1,0 +1,29 @@
+# Fly.io config for socketservice.js (real-time Socket.IO server)
+app = "threads-socket"
+primary_region = "sin"          # Singapore — change to closest: lax/iad/lhr/fra
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  START_SCRIPT = "socketservice.js"
+  PORT = "4000"
+  NODE_ENV = "production"
+
+[[services]]
+  internal_port = 4000
+  protocol = "tcp"
+
+  [[services.ports]]
+    handlers = ["http"]
+    port = 80
+
+  [[services.ports]]
+    handlers = ["tls", "http"]
+    port = 443
+
+  # Socket.IO needs long-lived connections — increase timeouts
+  [services.http_checks]
+    interval = "15s"
+    timeout  = "5s"
+    path     = "/health"

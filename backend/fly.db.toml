@@ -1,0 +1,13 @@
+# Fly.io config for dbinsertionKafka.js (DB writer — no HTTP port needed)
+app = "threads-db-worker"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  START_SCRIPT = "dbinsertionKafka.js"
+  NODE_ENV = "production"
+
+# No [[services]] block — this process has no HTTP server.
+# It only connects outbound to Kafka and MongoDB.
